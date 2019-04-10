@@ -23,6 +23,9 @@
 #include <boost/thread/mutex.hpp>
 #include <boost/thread/condition_variable.hpp>
 
+#include <prometheus/exposer.h>
+#include <prometheus/registry.h>
+
 #include <queue>
 
 namespace fc { class variant; }
@@ -41,6 +44,39 @@ namespace eosio {
 
 static appbase::abstract_plugin& _kafka_plugin = app().register_plugin<kafka_plugin>();
 using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
+
+    class PrometheusExposer {
+    private:
+        prometheus::Exposer exposer;
+        std::shared_ptr<prometheus::Registry> registry;
+        prometheus::Family<prometheus::Counter>& counterFamily;
+        prometheus::Counter& blockCounter;
+        prometheus::Counter& abnormalityBlockCounter;
+    public:
+        PrometheusExposer(const std::string& hostPort)
+            :
+            exposer({hostPort}),
+            registry(std::make_shared<prometheus::Registry>()),
+            counterFamily(prometheus::BuildCounter()
+                                       .Name("block_number_reached")
+                                       .Help("The last block number being exported by the Kafka plugin")
+                                       .Labels({{"name", "blockCounter"}})
+                                       .Register(*registry)),
+            blockCounter(counterFamily.Add(
+                {{"name", "blockCounter"}})),
+            abnormalityBlockCounter(counterFamily.Add(
+                {{"name", "abnormalityBlockCounter"}}))
+        {
+            exposer.RegisterCollectable(registry);
+        }
+
+        prometheus::Counter& getBlockCounter() {
+            return blockCounter;
+        }
+        prometheus::Counter& getAbnormalityBlockCounter() {
+            return abnormalityBlockCounter;
+        }
+    };
 
     class kafka_plugin_impl {
     public:
@@ -85,7 +121,9 @@ using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
 
         void _process_irreversible_block(const chain::block_state_ptr &);
 
-        void init();
+        void init(const variables_map &options);
+        static void kafkaCallbackFunction(rd_kafka_t *rk, const rd_kafka_message_t *rkmessage, void *opaque);
+        static void handle_kafka_exception();
 
         bool configured{false};
 
@@ -119,6 +157,11 @@ using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
         static const std::string actions_col;
         static const std::string accounts_col;
         kafka_producer_ptr producer;
+        const uint64_t KAFKA_BLOCK_REACHED_LOG_INTERVAL = 1000;
+        uint64_t kafkaBlockReached = 0;
+        uint64_t abnormalityDetectedAtBlock = 0;
+        static bool kafkaTriggeredQuit;
+        std::shared_ptr<PrometheusExposer> prometheusExposer;
     };
 
     const account_name kafka_plugin_impl::newaccount = "newaccount";
@@ -384,9 +427,29 @@ using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
        uint64_t time = (t.block_time.time_since_epoch().count()/1000);
             string transaction_metadata_json =
                     "{\"block_number\":" + std::to_string(t.block_number) + ",\"block_time\":" + std::to_string(time) +
-                    ",\"trace\":" + fc::json::to_string(t.trace).c_str() + "}";
-       producer->trx_kafka_sendmsg(KAFKA_TRX_APPLIED,(char*)transaction_metadata_json.c_str());
+                    ",\"trace\":" + fc::json::to_string(tracesVar).c_str() + "}";
 
+       producer->trx_kafka_sendmsg(KAFKA_TRX_APPLIED,
+                                   (char*)transaction_metadata_json.c_str(),
+                                   sstream.str());
+
+       if(0 == kafkaBlockReached) {
+           kafkaBlockReached = t.block_number;
+           prometheusExposer->getBlockCounter().Increment(kafkaBlockReached);
+       }
+       else if(kafkaBlockReached > t.block_number) {
+           // Mini fork detected
+           prometheusExposer->getAbnormalityBlockCounter().Increment(kafkaBlockReached - abnormalityDetectedAtBlock);
+           abnormalityDetectedAtBlock = kafkaBlockReached;
+       } else if(kafkaBlockReached > 0 && t.block_number > kafkaBlockReached + 1) {
+           // Jump over blocks detected. This should not really happen.
+           abnormalityDetectedAtBlock = kafkaBlockReached;
+           prometheusExposer->getAbnormalityBlockCounter().Increment(kafkaBlockReached - abnormalityDetectedAtBlock);
+           prometheusExposer->getBlockCounter().Increment(t.block_number - kafkaBlockReached);
+           kafkaBlockReached = t.block_number;
+       } else if(t.block_number == kafkaBlockReached + 1){
+           prometheusExposer->getBlockCounter().Increment();
+       }
     }
 
     void kafka_plugin_impl::_process_accepted_block( const chain::block_state_ptr& bs )
@@ -417,9 +480,16 @@ using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
        }
     }
 
-    void kafka_plugin_impl::init() {
+    void kafka_plugin_impl::init(const variables_map &options) {
+        ilog("Starting Prometheus exposer");
+        std::string prometheustHostPort = "127.0.0.1:8080";
 
-        ilog("starting kafka plugin thread");
+        if(options.count("prometheus-uri")) {
+            prometheustHostPort = options.at("prometheus-uri").as<std::string>();
+        }
+        prometheusExposer.reset(new PrometheusExposer(prometheustHostPort));
+
+        ilog("Starting kafka plugin thread");
         consume_thread = boost::thread([this] { consume_blocks(); });
         startup = false;
     }
@@ -513,13 +583,15 @@ using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
                         chain.applied_transaction.connect([&](const chain::transaction_trace_ptr &t) {
                             my->applied_transaction(t);
                         }));
-                my->init();
+                my->init(options);
             } else {
                 wlog( "eosio::kafka_plugin configured, but no --kafka-uri specified." );
                 wlog( "kafka_plugin disabled." );
             }
 
         }
+
+
 
         FC_LOG_AND_RETHROW()
     }
