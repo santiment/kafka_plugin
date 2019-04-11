@@ -60,7 +60,6 @@ using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
             counterFamily(prometheus::BuildCounter()
                                        .Name("block_number_reached")
                                        .Help("The last block number being exported by the Kafka plugin")
-                                       .Labels({{"name", "blockCounter"}})
                                        .Register(*registry)),
             blockCounter(counterFamily.Add(
                 {{"name", "blockCounter"}})),
