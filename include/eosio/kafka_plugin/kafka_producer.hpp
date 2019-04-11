@@ -1,5 +1,7 @@
 #pragma once
 
+#include <string>
+
 #include "rdkafka.h"
 
 namespace eosio {
@@ -10,6 +12,8 @@ namespace eosio {
 
 #define KAFKA_TRX_ACCEPT 0
 #define KAFKA_TRX_APPLIED 1
+
+using MessageCallbackFunctionPtr = void (*)(rd_kafka_t *rk, const rd_kafka_message_t * rkmessage, void *opaque);
 
 class kafka_producer {
     public:
@@ -23,9 +27,9 @@ class kafka_producer {
             applied_conf = NULL;
         };
 
-        int trx_kafka_init(char *brokers, char *acceptopic, char *appliedtopic);
+        int trx_kafka_init(char *brokers, char *acceptopic, char *appliedtopic, MessageCallbackFunctionPtr msgDeliveredCallback);
 
-        int trx_kafka_sendmsg(int trxtype, char *msgstr);
+        int trx_kafka_sendmsg(int trxtype, char *msgstr, const std::string& msgKey);
 
         int trx_kafka_destroy(void);
 
@@ -37,7 +41,6 @@ class kafka_producer {
         rd_kafka_conf_t *accept_conf;     /*kafka config*/
         rd_kafka_conf_t *applied_conf;     /*kafka config*/
 
-        static void dr_msg_cb(rd_kafka_t *rk, const rd_kafka_message_t *rkmessage, void *opaque){}
     };
 }
 

@@ -122,6 +122,7 @@ using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
         void _process_irreversible_block(const chain::block_state_ptr &);
 
         void init(const variables_map &options);
+
         static void kafkaCallbackFunction(rd_kafka_t *rk, const rd_kafka_message_t *rkmessage, void *opaque);
         static void handle_kafka_exception();
 
@@ -173,7 +174,7 @@ using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
     const std::string kafka_plugin_impl::trans_traces_col = "transaction_traces";
     const std::string kafka_plugin_impl::actions_col = "actions";
     const std::string kafka_plugin_impl::accounts_col = "accounts";
-
+    bool kafka_plugin_impl::kafkaTriggeredQuit = false;
 
     namespace {
 
@@ -263,7 +264,7 @@ using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
     void kafka_plugin_impl::consume_blocks() {
         try {
 
-            while (true) {
+            while (true && !app().is_quiting()) {
                 boost::mutex::scoped_lock lock(mtx);
                 while (transaction_metadata_queue.empty() &&
                        transaction_trace_queue.empty() &&
@@ -373,10 +374,13 @@ using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
             }
         } catch (fc::exception &e) {
             elog("FC Exception while processing applied transaction trace: ${e}", ("e", e.to_detail_string()));
+            handle_kafka_exception();
         } catch (std::exception &e) {
             elog("STD Exception while processing applied transaction trace: ${e}", ("e", e.what()));
+            handle_kafka_exception();
         } catch (...) {
             elog("Unknown exception while processing applied transaction trace");
+            handle_kafka_exception();
         }
     }
 
@@ -388,10 +392,13 @@ using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
             }
         } catch (fc::exception &e) {
             elog("FC Exception while processing irreversible block: ${e}", ("e", e.to_detail_string()));
+            handle_kafka_exception();
         } catch (std::exception &e) {
             elog("STD Exception while processing irreversible block: ${e}", ("e", e.what()));
+            handle_kafka_exception();
         } catch (...) {
             elog("Unknown exception while processing irreversible block");
+            handle_kafka_exception();
         }
     }
 
@@ -407,10 +414,13 @@ using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
             }
         } catch (fc::exception &e) {
             elog("FC Exception while processing accepted block trace ${e}", ("e", e.to_string()));
+            handle_kafka_exception();
         } catch (std::exception &e) {
             elog("STD Exception while processing accepted block trace ${e}", ("e", e.what()));
+            handle_kafka_exception();
         } catch (...) {
             elog("Unknown exception while processing accepted block trace");
+            handle_kafka_exception();
         }
     }
 
@@ -418,21 +428,70 @@ using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
 
        const auto& trx = t->trx;
        string trx_json = fc::json::to_string( trx );
-       producer->trx_kafka_sendmsg(KAFKA_TRX_ACCEPT,(char*)trx_json.c_str());
+       std::string noKey;
+       producer->trx_kafka_sendmsg(KAFKA_TRX_ACCEPT,
+                                   (char*)trx_json.c_str(),
+                                   noKey);
 
     }
 
-    void kafka_plugin_impl::_process_applied_transaction(const trasaction_info_st &t) {
+    // This will return the sequence id of the last action. Due to inner actions we need to recurse inside.
+    uint64_t getLastActionID(const vector<chain::action_trace>& vecActions) {
+        int lastIndex = vecActions.size()-1;
+        if( vecActions[lastIndex].inline_traces.empty()) {
+            return vecActions[lastIndex].receipt.global_sequence;
+        } else {
+            return getLastActionID(vecActions[lastIndex].inline_traces);
+        }
+    }
+
+    void filterSetcodeData(vector<chain::action_trace>& vecActions) {
+        for(auto& actTrace : vecActions) {
+            if("setcode" == actTrace.act.name.to_string() &&
+                "eosio" == actTrace.act.account.to_string()) {
+                chain::setcode sc = actTrace.act.data_as<chain::setcode>();
+                sc.code.clear();
+                actTrace.act.data = fc::raw::pack(sc);
+                dlog("'setcode' action is cleared of code data. Block number is: ${block_number}",
+                     ("block_number", actTrace.block_num));
+            }
+            if( !actTrace.inline_traces.empty()) {
+                filterSetcodeData(actTrace.inline_traces);
+            }
+        }
+    }
+
+     void kafka_plugin_impl::_process_applied_transaction(const trasaction_info_st &t) {
+       const auto& actionTraces = t.trace->action_traces;
+       if(actionTraces.empty()) {
+           dlog("Apply transaction is skipped. No actions inside. Block number is: ${block_number}",
+                ("block_number", t.block_number));
+           return;
+       }
+
+       filterSetcodeData(t.trace->action_traces);
+
+       auto last_sent_act_id = getLastActionID(actionTraces);
+
+       std::stringstream sstream;
+       sstream << last_sent_act_id;
 
        uint64_t time = (t.block_time.time_since_epoch().count()/1000);
-            string transaction_metadata_json =
+
+       // If the application is quitting it is unsafe to touch the chain_plugin. Return.
+       if(app().is_quiting()) {
+           return;
+       }
+       auto &chain = chain_plug->chain();
+       fc::variant tracesVar = chain.to_variant_with_abi(t.trace, chain_plug->get_abi_serializer_max_time());
+
+       string transaction_metadata_json =
                     "{\"block_number\":" + std::to_string(t.block_number) + ",\"block_time\":" + std::to_string(time) +
                     ",\"trace\":" + fc::json::to_string(tracesVar).c_str() + "}";
 
        producer->trx_kafka_sendmsg(KAFKA_TRX_APPLIED,
                                    (char*)transaction_metadata_json.c_str(),
                                    sstream.str());
-
        if(0 == kafkaBlockReached) {
            kafkaBlockReached = t.block_number;
            prometheusExposer->getBlockCounter().Increment(kafkaBlockReached);
@@ -494,6 +553,26 @@ using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
         startup = false;
     }
 
+    void kafka_plugin_impl::handle_kafka_exception() {
+        // Trigger quit once only
+        if(kafkaTriggeredQuit) {
+            return;
+        }
+        // For the time being quit on all
+        elog( "Kafka plugin triggers Quit due to error.");
+        app().quit();
+        kafkaTriggeredQuit = true;
+    }
+
+    void kafka_plugin_impl::kafkaCallbackFunction(rd_kafka_t *rk, const rd_kafka_message_t *rkmessage, void *opaque) {
+        if(nullptr == rkmessage ||
+           0 != rkmessage->err )
+        {
+            elog("Kafka message delivery failed: ${e}", ("e", rd_kafka_err2str(rkmessage->err)));
+            handle_kafka_exception();
+        }
+    }
+
 ////////////
 // kafka_plugin
 ////////////
@@ -534,14 +613,18 @@ using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
                 if (options.count("applied_trx_topic") != 0) {
                     applied_trx_topic = (char *) (options.at("applied_trx_topic").as<std::string>().c_str());
                 }
-                elog("brokers_str:${j}", ("j", brokers_str));
-                elog("accept_trx_topic:${j}", ("j", accept_trx_topic));
-                elog("applied_trx_topic:${j}", ("j", applied_trx_topic));
+                ilog("brokers_str:${j}", ("j", brokers_str));
+                if(accept_trx_topic) {
+                    ilog("accept_trx_topic:${j}", ("j", accept_trx_topic));
+                }
 
-                if (0!=my->producer->trx_kafka_init(brokers_str,accept_trx_topic,applied_trx_topic)){
+                ilog("applied_trx_topic:${j}", ("j", applied_trx_topic));
+
+                if (0 != my->producer->trx_kafka_init(brokers_str, accept_trx_topic, applied_trx_topic, my->kafkaCallbackFunction)) {
                     elog("trx_kafka_init fail");
+                    my->handle_kafka_exception();
                 } else{
-                    elog("trx_kafka_init ok");
+                    ilog("trx_kafka_init ok");
                 }
             }
 
@@ -575,10 +658,14 @@ using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
                             my->applied_irreversible_block(bs);
                         }));
 
-                my->accepted_transaction_connection.emplace(
-                        chain.accepted_transaction.connect([&](const chain::transaction_metadata_ptr &t) {
-                            my->accepted_transaction(t);
-                        }));
+                // If no accept trx topic name is specified - do not subscribe for the events.
+                if(accept_trx_topic) {
+                    my->accepted_transaction_connection.emplace(
+                            chain.accepted_transaction.connect([&](const chain::transaction_metadata_ptr &t) {
+                                my->accepted_transaction(t);
+                            }));
+                }
+
                 my->applied_transaction_connection.emplace(
                         chain.applied_transaction.connect([&](const chain::transaction_trace_ptr &t) {
                             my->applied_transaction(t);
