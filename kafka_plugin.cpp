@@ -499,13 +499,14 @@ using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
            // Mini fork detected
            prometheusExposer->getAbnormalityBlockCounter().Increment(kafkaBlockReached - abnormalityDetectedAtBlock);
            abnormalityDetectedAtBlock = kafkaBlockReached;
-       } else if(kafkaBlockReached > 0 && t.block_number > kafkaBlockReached + 1) {
+       } else if( t.block_number > kafkaBlockReached + 1) {
            // Jump over blocks detected. This should not really happen.
            abnormalityDetectedAtBlock = kafkaBlockReached;
            prometheusExposer->getAbnormalityBlockCounter().Increment(kafkaBlockReached - abnormalityDetectedAtBlock);
            prometheusExposer->getBlockCounter().Increment(t.block_number - kafkaBlockReached);
            kafkaBlockReached = t.block_number;
        } else if(t.block_number == kafkaBlockReached + 1){
+           // Normal case.
            prometheusExposer->getBlockCounter().Increment();
        }
     }
@@ -678,8 +679,6 @@ using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
             }
 
         }
-
-
 
         FC_LOG_AND_RETHROW()
     }
