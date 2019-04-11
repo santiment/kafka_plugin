@@ -540,12 +540,12 @@ using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
     }
 
     void kafka_plugin_impl::init(const variables_map &options) {
-        ilog("Starting Prometheus exposer");
-        std::string prometheustHostPort = "127.0.0.1:8080";
+        std::string prometheustHostPort = "0.0.0.0:8080";
 
         if(options.count("prometheus-uri")) {
             prometheustHostPort = options.at("prometheus-uri").as<std::string>();
         }
+        ilog("Starting Prometheus exposer at port: " + prometheustHostPort);
         prometheusExposer.reset(new PrometheusExposer(prometheustHostPort));
 
         ilog("Starting kafka plugin thread");
@@ -596,6 +596,8 @@ using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
                  "The target queue size between nodeos and kafka plugin thread.")
                 ("kafka-block-start", bpo::value<uint32_t>()->default_value(256),
                  "If specified then only abi data pushed to kafka until specified block is reached.")
+                ("prometheus-uri", bpo::value<std::string>(),
+                 "Host:port on which to open Prometheus Exposer.")
                  ;
     }
 
