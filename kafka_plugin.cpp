@@ -501,13 +501,14 @@ using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
            abnormalityDetectedAtBlock = kafkaBlockReached;
        } else if( t.block_number > kafkaBlockReached + 1) {
            // Jump over blocks detected. This should not really happen.
-           abnormalityDetectedAtBlock = kafkaBlockReached;
            prometheusExposer->getAbnormalityBlockCounter().Increment(kafkaBlockReached - abnormalityDetectedAtBlock);
+           abnormalityDetectedAtBlock = kafkaBlockReached;
            prometheusExposer->getBlockCounter().Increment(t.block_number - kafkaBlockReached);
            kafkaBlockReached = t.block_number;
        } else if(t.block_number == kafkaBlockReached + 1){
            // Normal case.
            prometheusExposer->getBlockCounter().Increment();
+           ++kafkaBlockReached;
        }
     }
 
