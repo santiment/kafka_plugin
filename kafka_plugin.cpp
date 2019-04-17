@@ -23,6 +23,9 @@
 #include <boost/thread/mutex.hpp>
 #include <boost/thread/condition_variable.hpp>
 
+#include <prometheus/exposer.h>
+#include <prometheus/registry.h>
+
 #include <queue>
 
 namespace fc { class variant; }
@@ -41,6 +44,38 @@ namespace eosio {
 
 static appbase::abstract_plugin& _kafka_plugin = app().register_plugin<kafka_plugin>();
 using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
+
+    class PrometheusExposer {
+    private:
+        prometheus::Exposer exposer;
+        std::shared_ptr<prometheus::Registry> registry;
+        prometheus::Family<prometheus::Gauge>& gaugeFamily;
+        prometheus::Gauge& blockGauge;
+        prometheus::Gauge& abnormalityBlockGauge;
+    public:
+        PrometheusExposer(const std::string& hostPort)
+            :
+            exposer({hostPort}),
+            registry(std::make_shared<prometheus::Registry>()),
+            gaugeFamily(prometheus::BuildGauge()
+                                       .Name("block_number_reached")
+                                       .Help("The last block number being exported by the Kafka plugin")
+                                       .Register(*registry)),
+            blockGauge(gaugeFamily.Add(
+                {{"name", "blockCounter"}})),
+            abnormalityBlockGauge(gaugeFamily.Add(
+                {{"name", "abnormalityBlockCounter"}}))
+        {
+            exposer.RegisterCollectable(registry);
+        }
+
+        prometheus::Gauge& getBlockGauge() {
+            return blockGauge;
+        }
+        prometheus::Gauge& getAbnormalityBlockGauge() {
+            return abnormalityBlockGauge;
+        }
+    };
 
     class kafka_plugin_impl {
     public:
@@ -85,7 +120,8 @@ using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
 
         void _process_irreversible_block(const chain::block_state_ptr &);
 
-        void init();
+        void init(const variables_map &options);
+
         static void kafkaCallbackFunction(rd_kafka_t *rk, const rd_kafka_message_t *rkmessage, void *opaque);
         static void handle_kafka_exception();
 
@@ -122,8 +158,8 @@ using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
         static const std::string accounts_col;
         kafka_producer_ptr producer;
         const uint64_t KAFKA_BLOCK_REACHED_LOG_INTERVAL = 1000;
-        uint64_t kafkaBlockReached = 0;
         static bool kafkaTriggeredQuit;
+        std::shared_ptr<PrometheusExposer> prometheusExposer;
     };
 
     const account_name kafka_plugin_impl::newaccount = "newaccount";
@@ -453,14 +489,17 @@ using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
        producer->trx_kafka_sendmsg(KAFKA_TRX_APPLIED,
                                    (char*)transaction_metadata_json.c_str(),
                                    sstream.str());
-
-       if(0 == t.block_number % KAFKA_BLOCK_REACHED_LOG_INTERVAL &&
-               kafkaBlockReached < t.block_number) {
-           kafkaBlockReached = t.block_number;
-           ilog("Block number ${block_number} reached Kafka plugin",
-                ("block_number", t.block_number));
+       if(0 == prometheusExposer->getBlockGauge().Value()) {
+           prometheusExposer->getBlockGauge().Set(t.block_number);
        }
-
+       else if(( t.block_number < prometheusExposer->getBlockGauge().Value()) || // Mini fork detected
+               ( t.block_number > prometheusExposer->getBlockGauge().Value() + 1)) {// Jump over blocks detected. This should not really happen.
+           prometheusExposer->getAbnormalityBlockGauge().Set(prometheusExposer->getBlockGauge().Value());
+           prometheusExposer->getBlockGauge().Set(t.block_number);
+       } else if(t.block_number == prometheusExposer->getBlockGauge().Value() + 1){
+           // Normal case.
+           prometheusExposer->getBlockGauge().Increment();
+       }
     }
 
     void kafka_plugin_impl::_process_accepted_block( const chain::block_state_ptr& bs )
@@ -491,9 +530,16 @@ using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
        }
     }
 
-    void kafka_plugin_impl::init() {
+    void kafka_plugin_impl::init(const variables_map &options) {
+        std::string prometheustHostPort = "0.0.0.0:8080";
 
-        ilog("starting kafka plugin thread");
+        if(options.count("prometheus-uri")) {
+            prometheustHostPort = options.at("prometheus-uri").as<std::string>();
+        }
+        ilog("Starting Prometheus exposer at port: " + prometheustHostPort);
+        prometheusExposer.reset(new PrometheusExposer(prometheustHostPort));
+
+        ilog("Starting kafka plugin thread");
         consume_thread = boost::thread([this] { consume_blocks(); });
         startup = false;
     }
@@ -541,6 +587,8 @@ using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
                  "The target queue size between nodeos and kafka plugin thread.")
                 ("kafka-block-start", bpo::value<uint32_t>()->default_value(256),
                  "If specified then only abi data pushed to kafka until specified block is reached.")
+                ("prometheus-uri", bpo::value<std::string>(),
+                 "Host:port on which to open Prometheus Exposer.")
                  ;
     }
 
@@ -615,7 +663,7 @@ using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
                         chain.applied_transaction.connect([&](const chain::transaction_trace_ptr &t) {
                             my->applied_transaction(t);
                         }));
-                my->init();
+                my->init(options);
             } else {
                 wlog( "eosio::kafka_plugin configured, but no --kafka-uri specified." );
                 wlog( "kafka_plugin disabled." );
