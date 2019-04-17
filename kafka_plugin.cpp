@@ -49,31 +49,31 @@ using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
     private:
         prometheus::Exposer exposer;
         std::shared_ptr<prometheus::Registry> registry;
-        prometheus::Family<prometheus::Counter>& counterFamily;
-        prometheus::Counter& blockCounter;
-        prometheus::Counter& abnormalityBlockCounter;
+        prometheus::Family<prometheus::Gauge>& gaugeFamily;
+        prometheus::Gauge& blockGauge;
+        prometheus::Gauge& abnormalityBlockGauge;
     public:
         PrometheusExposer(const std::string& hostPort)
             :
             exposer({hostPort}),
             registry(std::make_shared<prometheus::Registry>()),
-            counterFamily(prometheus::BuildCounter()
+            gaugeFamily(prometheus::BuildGauge()
                                        .Name("block_number_reached")
                                        .Help("The last block number being exported by the Kafka plugin")
                                        .Register(*registry)),
-            blockCounter(counterFamily.Add(
+            blockGauge(gaugeFamily.Add(
                 {{"name", "blockCounter"}})),
-            abnormalityBlockCounter(counterFamily.Add(
+            abnormalityBlockGauge(gaugeFamily.Add(
                 {{"name", "abnormalityBlockCounter"}}))
         {
             exposer.RegisterCollectable(registry);
         }
 
-        prometheus::Counter& getBlockCounter() {
-            return blockCounter;
+        prometheus::Gauge& getBlockGauge() {
+            return blockGauge;
         }
-        prometheus::Counter& getAbnormalityBlockCounter() {
-            return abnormalityBlockCounter;
+        prometheus::Gauge& getAbnormalityBlockGauge() {
+            return abnormalityBlockGauge;
         }
     };
 
@@ -158,8 +158,6 @@ using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
         static const std::string accounts_col;
         kafka_producer_ptr producer;
         const uint64_t KAFKA_BLOCK_REACHED_LOG_INTERVAL = 1000;
-        uint64_t kafkaBlockReached = 0;
-        uint64_t abnormalityDetectedAtBlock = 0;
         static bool kafkaTriggeredQuit;
         std::shared_ptr<PrometheusExposer> prometheusExposer;
     };
@@ -491,24 +489,16 @@ using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
        producer->trx_kafka_sendmsg(KAFKA_TRX_APPLIED,
                                    (char*)transaction_metadata_json.c_str(),
                                    sstream.str());
-       if(0 == kafkaBlockReached) {
-           kafkaBlockReached = t.block_number;
-           prometheusExposer->getBlockCounter().Increment(kafkaBlockReached);
+       if(0 == prometheusExposer->getBlockGauge().Value()) {
+           prometheusExposer->getBlockGauge().Set(t.block_number);
        }
-       else if(kafkaBlockReached > t.block_number) {
-           // Mini fork detected
-           prometheusExposer->getAbnormalityBlockCounter().Increment(kafkaBlockReached - abnormalityDetectedAtBlock);
-           abnormalityDetectedAtBlock = kafkaBlockReached;
-       } else if( t.block_number > kafkaBlockReached + 1) {
-           // Jump over blocks detected. This should not really happen.
-           prometheusExposer->getAbnormalityBlockCounter().Increment(kafkaBlockReached - abnormalityDetectedAtBlock);
-           abnormalityDetectedAtBlock = kafkaBlockReached;
-           prometheusExposer->getBlockCounter().Increment(t.block_number - kafkaBlockReached);
-           kafkaBlockReached = t.block_number;
-       } else if(t.block_number == kafkaBlockReached + 1){
+       else if(( t.block_number < prometheusExposer->getBlockGauge().Value()) || // Mini fork detected
+               ( t.block_number > prometheusExposer->getBlockGauge().Value() + 1)) {// Jump over blocks detected. This should not really happen.
+           prometheusExposer->getAbnormalityBlockGauge().Set(prometheusExposer->getBlockGauge().Value());
+           prometheusExposer->getBlockGauge().Set(t.block_number);
+       } else if(t.block_number == prometheusExposer->getBlockGauge().Value() + 1){
            // Normal case.
-           prometheusExposer->getBlockCounter().Increment();
-           ++kafkaBlockReached;
+           prometheusExposer->getBlockGauge().Increment();
        }
     }
 
