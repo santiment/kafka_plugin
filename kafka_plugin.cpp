@@ -52,6 +52,7 @@ using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
         prometheus::Family<prometheus::Gauge>& gaugeFamily;
         prometheus::Gauge& blockGauge;
         prometheus::Gauge& abnormalityBlockGauge;
+        prometheus::Gauge& pendingBlocksGauge;
     public:
         PrometheusExposer(const std::string& hostPort)
             :
@@ -64,7 +65,9 @@ using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
             blockGauge(gaugeFamily.Add(
                 {{"name", "blockCounter"}})),
             abnormalityBlockGauge(gaugeFamily.Add(
-                {{"name", "abnormalityBlockCounter"}}))
+                {{"name", "abnormalityBlockCounter"}})),
+            pendingBlocksGauge(gaugeFamily.Add(
+              {{"name", "pendingBlocksCounter"}}))
         {
             exposer.RegisterCollectable(registry);
         }
@@ -74,6 +77,9 @@ using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
         }
         prometheus::Gauge& getAbnormalityBlockGauge() {
             return abnormalityBlockGauge;
+        }
+        prometheus::Gauge& getPendingBlocksGauge() {
+            return pendingBlocksGauge;
         }
     };
 
@@ -481,20 +487,29 @@ using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
 
     void kafka_plugin_impl::_process_irreversible_block(const chain::block_state_ptr& bs)
     {
-        if(bs->block_num <= prometheusExposer->getBlockGauge().Value()) {
-            // This block is already handled.
+        if( bs->block_num == prometheusExposer->getBlockGauge().Value() + 1
+                ||
+            0 == prometheusExposer->getBlockGauge().Value() )
+        {
+            prometheusExposer->getBlockGauge().Set(bs->block_num);
+        }
+        else
+        {
+            // Previous or future block
             // TODO Find out why we are notified more than once per block
             return;
         }
 
-        prometheusExposer->getBlockGauge().Set(bs->block_num);
 
-        for(std::map<uint64_t, std::map<transaction_id_type, trasaction_info_st>>::iterator iter = appliedTrxPerBlock.begin();
-            iter != appliedTrxPerBlock.end() && iter->first <= bs->block_num;
-            ) {
+        std::map<uint64_t, std::map<transaction_id_type, trasaction_info_st>>::iterator iter = appliedTrxPerBlock.find(bs->block_num);
+
+        if(iter != appliedTrxPerBlock.end())
+        {
             _process_applied_block(iter->second, bs->block->transactions);
-            iter = appliedTrxPerBlock.erase(iter);
+            appliedTrxPerBlock.erase(iter);
         }
+
+        prometheusExposer->getPendingBlocksGauge().Set(appliedTrxPerBlock.size());
     }
 
     kafka_plugin_impl::kafka_plugin_impl()
