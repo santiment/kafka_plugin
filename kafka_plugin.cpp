@@ -419,7 +419,8 @@ using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
 
      void kafka_plugin_impl::_process_applied_transaction(const trasaction_info_st &t) {
        if(t.trace->action_traces.empty()) {
-           dlog("Apply transaction is skipped. No actions inside. Block number is: ${block_number}",
+           dlog("Apply transaction with id: ${id} is skipped. No actions inside. Block number is: ${block_number}",
+                ("id", t.trace->id.str())
                 ("block_number", t.block_number));
            return;
        }
