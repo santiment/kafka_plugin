@@ -53,6 +53,7 @@ using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
         prometheus::Gauge& blockGauge;
         prometheus::Gauge& abnormalityBlockGauge;
         prometheus::Gauge& pendingBlocksGauge;
+        prometheus::Gauge& oldestPendingBlockGauge;
     public:
         PrometheusExposer(const std::string& hostPort)
             :
@@ -67,7 +68,9 @@ using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
             abnormalityBlockGauge(gaugeFamily.Add(
                 {{"name", "abnormalityBlockCounter"}})),
             pendingBlocksGauge(gaugeFamily.Add(
-              {{"name", "pendingBlocksCounter"}}))
+              {{"name", "pendingBlocksCounter"}})),
+            oldestPendingBlockGauge(gaugeFamily.Add(
+              {{"name", "oldestPendingBlock"}}))
         {
             exposer.RegisterCollectable(registry);
         }
@@ -80,6 +83,9 @@ using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
         }
         prometheus::Gauge& getPendingBlocksGauge() {
             return pendingBlocksGauge;
+        }
+        prometheus::Gauge& getOldestPendingBlockGauge() {
+            return oldestPendingBlockGauge;
         }
     };
 
@@ -511,6 +517,7 @@ using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
         }
 
         prometheusExposer->getPendingBlocksGauge().Set(appliedTrxPerBlock.size());
+        prometheusExposer->getOldestPendingBlockGauge().Set(appliedTrxPerBlock.empty() ? 0 : appliedTrxPerBlock.begin()->first);
     }
 
     kafka_plugin_impl::kafka_plugin_impl()
