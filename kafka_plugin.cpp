@@ -128,7 +128,8 @@ using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
         void init(const variables_map &options);
 
         void _process_applied_block(std::map<transaction_id_type, trasaction_info_st>& trxsInThisBlock,
-                                    const vector<chain::transaction_receipt>& trxReceipts);
+                                    const vector<chain::transaction_receipt>& trxReceipts,
+                                    uint64_t blockNumber);
 
         static void kafkaCallbackFunction(rd_kafka_t *rk, const rd_kafka_message_t *rkmessage, void *opaque);
         static void handle_kafka_exception();
@@ -441,7 +442,8 @@ using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
      }
 
      void kafka_plugin_impl::_process_applied_block(std::map<transaction_id_type, trasaction_info_st>& trxsInThisBlock,
-                                                    const vector<chain::transaction_receipt>& trxReceipts) {
+                                                    const vector<chain::transaction_receipt>& trxReceipts,
+                                                    uint64_t blockNumber) {
        for(const chain::transaction_receipt& receipt : trxReceipts) {
            transaction_id_type trxId;
            if( receipt.trx.contains<transaction_id_type>() ) {
@@ -453,7 +455,10 @@ using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
 
            std::map<transaction_id_type, trasaction_info_st>::iterator iterTrx = trxsInThisBlock.find(trxId);
            if(iterTrx == trxsInThisBlock.end()) {
-               elog( "Can not find stored transaction with id: ${e}", ("e", trxId.str()));
+               elog( "Can not find stored transaction with id: ${e}, status is ${status}, block id is: ${block_id}",
+                     ("e", trxId.str())
+                     ("status", std::string(receipt.status))
+                     ("block_id", blockNumber));
                continue;
            }
 
@@ -512,7 +517,7 @@ using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
 
         if(iter != appliedTrxPerBlock.end())
         {
-            _process_applied_block(iter->second, bs->block->transactions);
+            _process_applied_block(iter->second, bs->block->transactions, bs->block_num);
             appliedTrxPerBlock.erase(iter);
         }
 
