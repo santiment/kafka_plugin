@@ -447,6 +447,9 @@ using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
        for(const chain::transaction_receipt& receipt : trxReceipts) {
            transaction_id_type trxId;
 
+           if(receipt.status != chain::transaction_receipt_header::executed) {
+               continue;
+           }
            if( receipt.trx.contains<packed_transaction>() ) {
               const auto& pt = receipt.trx.get<packed_transaction>();
               // get id via get_raw_transaction() as packed_transaction.id() mutates internal transaction state
