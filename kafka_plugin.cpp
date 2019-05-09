@@ -446,11 +446,15 @@ using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
                                                     uint64_t blockNumber) {
        for(const chain::transaction_receipt& receipt : trxReceipts) {
            transaction_id_type trxId;
-           if( receipt.trx.contains<transaction_id_type>() ) {
-               trxId = receipt.trx.get<transaction_id_type>();
-           }
-           else {
-               trxId = receipt.trx.get<packed_transaction>().id();
+
+           if( receipt.trx.contains<packed_transaction>() ) {
+              const auto& pt = receipt.trx.get<packed_transaction>();
+              // get id via get_raw_transaction() as packed_transaction.id() mutates internal transaction state
+              const auto& raw = pt.get_raw_transaction();
+              const auto& trx = fc::raw::unpack<transaction>( raw );
+              trxId = trx.id();
+           } else {
+              trxId = receipt.trx.get<transaction_id_type>();
            }
 
            std::map<transaction_id_type, trasaction_info_st>::iterator iterTrx = trxsInThisBlock.find(trxId);
