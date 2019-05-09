@@ -444,6 +444,8 @@ using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
      void kafka_plugin_impl::_process_applied_block(std::map<transaction_id_type, trasaction_info_st>& trxsInThisBlock,
                                                     const vector<chain::transaction_receipt>& trxReceipts,
                                                     uint64_t blockNumber) {
+       // Iterate over all the receipts received in this block. Get the complete actions out of the previously
+       // stored map for this block.
        for(const chain::transaction_receipt& receipt : trxReceipts) {
            transaction_id_type trxId;
 
@@ -488,6 +490,7 @@ using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
            auto &chain = chain_plug->chain();
            fc::variant tracesVar = chain.to_variant_with_abi(*transactionTrace, chain_plug->get_abi_serializer_max_time());
 
+           // Store the block time at an upper layer. This allows us to easily correct if it varies for actions inside.
            string transaction_metadata_json =
                         "{\"block_number\":" + std::to_string(iterTrx->second.block_number) + ",\"block_time\":" + std::to_string(time) +
                         ",\"trace\":" + fc::json::to_string(tracesVar).c_str() + "}";
@@ -495,8 +498,6 @@ using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
            producer->trx_kafka_sendmsg(KAFKA_TRX_APPLIED,
                                        (char*)transaction_metadata_json.c_str(),
                                        sstream.str());
-
-           trxsInThisBlock.erase(trxId);
        }
     }
 
@@ -506,8 +507,8 @@ using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
 
     void kafka_plugin_impl::_process_irreversible_block(const chain::block_state_ptr& bs)
     {
-        if( bs->block_num == prometheusExposer->getBlockGauge().Value() + 1
-                ||
+        // We get notified for each and every block. Wait for the notification for the exactly next block.
+        if( bs->block_num == prometheusExposer->getBlockGauge().Value() + 1 ||
             0 == prometheusExposer->getBlockGauge().Value() )
         {
             prometheusExposer->getBlockGauge().Set(bs->block_num);
@@ -519,7 +520,7 @@ using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
             return;
         }
 
-
+        // This block has become 'irreversible'. If any actions have been registered process them now.
         std::map<uint64_t, std::map<transaction_id_type, trasaction_info_st>>::iterator iter = appliedTrxPerBlock.find(bs->block_num);
 
         if(iter != appliedTrxPerBlock.end())
@@ -528,6 +529,7 @@ using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
             appliedTrxPerBlock.erase(iter);
         }
 
+        // Update our monitoring system
         prometheusExposer->getPendingBlocksGauge().Set(appliedTrxPerBlock.size());
         prometheusExposer->getOldestPendingBlockGauge().Set(appliedTrxPerBlock.empty() ? 0 : appliedTrxPerBlock.begin()->first);
     }
