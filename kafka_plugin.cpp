@@ -52,6 +52,8 @@ using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
         prometheus::Family<prometheus::Gauge>& gaugeFamily;
         prometheus::Gauge& blockGauge;
         prometheus::Gauge& abnormalityBlockGauge;
+        prometheus::Gauge& pendingBlocksGauge;
+        prometheus::Gauge& oldestPendingBlockGauge;
     public:
         PrometheusExposer(const std::string& hostPort)
             :
@@ -64,7 +66,11 @@ using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
             blockGauge(gaugeFamily.Add(
                 {{"name", "blockCounter"}})),
             abnormalityBlockGauge(gaugeFamily.Add(
-                {{"name", "abnormalityBlockCounter"}}))
+                {{"name", "abnormalityBlockCounter"}})),
+            pendingBlocksGauge(gaugeFamily.Add(
+              {{"name", "pendingBlocksCounter"}})),
+            oldestPendingBlockGauge(gaugeFamily.Add(
+              {{"name", "oldestPendingBlock"}}))
         {
             exposer.RegisterCollectable(registry);
         }
@@ -74,6 +80,12 @@ using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
         }
         prometheus::Gauge& getAbnormalityBlockGauge() {
             return abnormalityBlockGauge;
+        }
+        prometheus::Gauge& getPendingBlocksGauge() {
+            return pendingBlocksGauge;
+        }
+        prometheus::Gauge& getOldestPendingBlockGauge() {
+            return oldestPendingBlockGauge;
         }
     };
 
@@ -85,7 +97,6 @@ using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
 
         fc::optional<boost::signals2::scoped_connection> accepted_block_connection;
         fc::optional<boost::signals2::scoped_connection> irreversible_block_connection;
-        fc::optional<boost::signals2::scoped_connection> accepted_transaction_connection;
         fc::optional<boost::signals2::scoped_connection> applied_transaction_connection;
         chain_plugin *chain_plug;
         struct trasaction_info_st {
@@ -100,13 +111,7 @@ using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
 
         void applied_irreversible_block(const chain::block_state_ptr &);
 
-        void accepted_transaction(const chain::transaction_metadata_ptr &);
-
         void applied_transaction(const chain::transaction_trace_ptr &);
-
-        void process_accepted_transaction(const chain::transaction_metadata_ptr &);
-
-        void _process_accepted_transaction(const chain::transaction_metadata_ptr &);
 
         void process_applied_transaction(const trasaction_info_st &);
 
@@ -121,6 +126,10 @@ using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
         void _process_irreversible_block(const chain::block_state_ptr &);
 
         void init(const variables_map &options);
+
+        void _process_applied_block(std::map<transaction_id_type, trasaction_info_st>& trxsInThisBlock,
+                                    const vector<chain::transaction_receipt>& trxReceipts,
+                                    uint64_t blockNumber);
 
         static void kafkaCallbackFunction(rd_kafka_t *rk, const rd_kafka_message_t *rkmessage, void *opaque);
         static void handle_kafka_exception();
@@ -160,6 +169,7 @@ using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
         const uint64_t KAFKA_BLOCK_REACHED_LOG_INTERVAL = 1000;
         static bool kafkaTriggeredQuit;
         std::shared_ptr<PrometheusExposer> prometheusExposer;
+        std::map<uint64_t, std::map<transaction_id_type, trasaction_info_st>> appliedTrxPerBlock;
     };
 
     const account_name kafka_plugin_impl::newaccount = "newaccount";
@@ -199,18 +209,6 @@ using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
             condition.notify_one();
         }
 
-    }
-
-    void kafka_plugin_impl::accepted_transaction(const chain::transaction_metadata_ptr &t) {
-        try {
-            queue(mtx, condition, transaction_metadata_queue, t, queue_size);
-        } catch (fc::exception &e) {
-            elog("FC Exception while accepted_transaction ${e}", ("e", e.to_string()));
-        } catch (std::exception &e) {
-            elog("STD Exception while accepted_transaction ${e}", ("e", e.what()));
-        } catch (...) {
-            elog("Unknown exception while accepted_transaction");
-        }
     }
 
     void kafka_plugin_impl::applied_transaction(const chain::transaction_trace_ptr &t) {
@@ -305,13 +303,6 @@ using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
                     ilog("draining queue, size: ${q}", ("q", transaction_metadata_size + transaction_trace_size));
                 }
 
-                // process transactions
-                while (!transaction_metadata_process_queue.empty()) {
-                    const auto &t = transaction_metadata_process_queue.front();
-                    process_accepted_transaction(t);
-                    transaction_metadata_process_queue.pop_front();
-                }
-
                 while (!transaction_trace_process_queue.empty()) {
                     const auto &t = transaction_trace_process_queue.front();
                     process_applied_transaction(t);
@@ -347,20 +338,6 @@ using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
             elog("STD Exception while consuming block ${e}", ("e", e.what()));
         } catch (...) {
             elog("Unknown exception while consuming block");
-        }
-    }
-
-
-    void kafka_plugin_impl::process_accepted_transaction(const chain::transaction_metadata_ptr &t) {
-        try {
-            // always call since we need to capture setabi on accounts even if not storing transactions
-            _process_accepted_transaction(t);
-        } catch (fc::exception &e) {
-            elog("FC Exception while processing accepted transaction metadata: ${e}", ("e", e.to_detail_string()));
-        } catch (std::exception &e) {
-            elog("STD Exception while processing accepted tranasction metadata: ${e}", ("e", e.what()));
-        } catch (...) {
-            elog("Unknown exception while processing accepted transaction metadata");
         }
     }
 
@@ -421,17 +398,6 @@ using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
         }
     }
 
-    void kafka_plugin_impl::_process_accepted_transaction(const chain::transaction_metadata_ptr &t) {
-
-       const auto& trx = t->trx;
-       string trx_json = fc::json::to_string( trx );
-       std::string noKey;
-       producer->trx_kafka_sendmsg(KAFKA_TRX_ACCEPT,
-                                   (char*)trx_json.c_str(),
-                                   noKey);
-
-    }
-
     // This will return the sequence id of the last action. Due to inner actions we need to recurse inside.
     uint64_t getLastActionID(const vector<chain::action_trace>& vecActions) {
         int lastIndex = vecActions.size()-1;
@@ -459,46 +425,79 @@ using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
     }
 
      void kafka_plugin_impl::_process_applied_transaction(const trasaction_info_st &t) {
-       const auto& actionTraces = t.trace->action_traces;
-       if(actionTraces.empty()) {
-           dlog("Apply transaction is skipped. No actions inside. Block number is: ${block_number}",
+       if(t.trace->action_traces.empty()) {
+           dlog("Apply transaction with id: ${id} is skipped. No actions inside. Block number is: ${block_number}",
+                ("id", t.trace->id.str())
                 ("block_number", t.block_number));
            return;
        }
 
-       filterSetcodeData(t.trace->action_traces);
-
-       auto last_sent_act_id = getLastActionID(actionTraces);
-
-       std::stringstream sstream;
-       sstream << last_sent_act_id;
-
-       uint64_t time = (t.block_time.time_since_epoch().count()/1000);
-
-       // If the application is quitting it is unsafe to touch the chain_plugin. Return.
-       if(app().is_quiting()) {
+       if( t.block_number <= prometheusExposer->getBlockGauge().Value()) { // Late applied action for irreversible block.
+           prometheusExposer->getAbnormalityBlockGauge().Set(prometheusExposer->getBlockGauge().Value());
            return;
        }
-       auto &chain = chain_plug->chain();
-       fc::variant tracesVar = chain.to_variant_with_abi(t.trace, chain_plug->get_abi_serializer_max_time());
 
-       string transaction_metadata_json =
-                    "{\"block_number\":" + std::to_string(t.block_number) + ",\"block_time\":" + std::to_string(time) +
-                    ",\"trace\":" + fc::json::to_string(tracesVar).c_str() + "}";
+       // Only register the transaction. Process it once the block is irreversible.
+       appliedTrxPerBlock[t.block_number].insert(std::make_pair(t.trace->id, t));
+     }
 
-       producer->trx_kafka_sendmsg(KAFKA_TRX_APPLIED,
-                                   (char*)transaction_metadata_json.c_str(),
-                                   sstream.str());
-       if(0 == prometheusExposer->getBlockGauge().Value()) {
-           prometheusExposer->getBlockGauge().Set(t.block_number);
-       }
-       else if(( t.block_number < prometheusExposer->getBlockGauge().Value()) || // Mini fork detected
-               ( t.block_number > prometheusExposer->getBlockGauge().Value() + 1)) {// Jump over blocks detected. This should not really happen.
-           prometheusExposer->getAbnormalityBlockGauge().Set(prometheusExposer->getBlockGauge().Value());
-           prometheusExposer->getBlockGauge().Set(t.block_number);
-       } else if(t.block_number == prometheusExposer->getBlockGauge().Value() + 1){
-           // Normal case.
-           prometheusExposer->getBlockGauge().Increment();
+     void kafka_plugin_impl::_process_applied_block(std::map<transaction_id_type, trasaction_info_st>& trxsInThisBlock,
+                                                    const vector<chain::transaction_receipt>& trxReceipts,
+                                                    uint64_t blockNumber) {
+       // Iterate over all the receipts received in this block. Get the complete actions out of the previously
+       // stored map for this block.
+       for(const chain::transaction_receipt& receipt : trxReceipts) {
+           transaction_id_type trxId;
+
+           if(receipt.status != chain::transaction_receipt_header::executed) {
+               continue;
+           }
+           if( receipt.trx.contains<packed_transaction>() ) {
+              const auto& pt = receipt.trx.get<packed_transaction>();
+              // get id via get_raw_transaction() as packed_transaction.id() mutates internal transaction state
+              const auto& raw = pt.get_raw_transaction();
+              const auto& trx = fc::raw::unpack<transaction>( raw );
+              trxId = trx.id();
+           } else {
+              trxId = receipt.trx.get<transaction_id_type>();
+           }
+
+           std::map<transaction_id_type, trasaction_info_st>::iterator iterTrx = trxsInThisBlock.find(trxId);
+           if(iterTrx == trxsInThisBlock.end()) {
+               elog( "Can not find stored transaction with id: ${e}, status is ${status}, block id is: ${block_id}",
+                     ("e", trxId.str())
+                     ("status", std::string(receipt.status))
+                     ("block_id", blockNumber));
+               continue;
+           }
+
+           auto& transactionTrace = iterTrx->second.trace;
+           auto& actionTraces = transactionTrace->action_traces;
+
+           filterSetcodeData(actionTraces);
+
+           auto last_sent_act_id = getLastActionID(actionTraces);
+
+           std::stringstream sstream;
+           sstream << last_sent_act_id;
+
+           uint64_t time = (iterTrx->second.block_time.time_since_epoch().count()/1000);
+
+           // If the application is quitting it is unsafe to touch the chain_plugin. Return.
+           if(app().is_quiting()) {
+               return;
+           }
+           auto &chain = chain_plug->chain();
+           fc::variant tracesVar = chain.to_variant_with_abi(*transactionTrace, chain_plug->get_abi_serializer_max_time());
+
+           // Store the block time at an upper layer. This allows us to easily correct if it varies for actions inside.
+           string transaction_metadata_json =
+                        "{\"block_number\":" + std::to_string(iterTrx->second.block_number) + ",\"block_time\":" + std::to_string(time) +
+                        ",\"trace\":" + fc::json::to_string(tracesVar).c_str() + "}";
+
+           producer->trx_kafka_sendmsg(KAFKA_TRX_APPLIED,
+                                       (char*)transaction_metadata_json.c_str(),
+                                       sstream.str());
        }
     }
 
@@ -508,6 +507,31 @@ using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
 
     void kafka_plugin_impl::_process_irreversible_block(const chain::block_state_ptr& bs)
     {
+        // We get notified for each and every block. Wait for the notification for the exactly next block.
+        if( bs->block_num == prometheusExposer->getBlockGauge().Value() + 1 ||
+            0 == prometheusExposer->getBlockGauge().Value() )
+        {
+            prometheusExposer->getBlockGauge().Set(bs->block_num);
+        }
+        else
+        {
+            // Previous or future block
+            // TODO Find out why we are notified more than once per block
+            return;
+        }
+
+        // This block has become 'irreversible'. If any actions have been registered process them now.
+        std::map<uint64_t, std::map<transaction_id_type, trasaction_info_st>>::iterator iter = appliedTrxPerBlock.find(bs->block_num);
+
+        if(iter != appliedTrxPerBlock.end())
+        {
+            _process_applied_block(iter->second, bs->block->transactions, bs->block_num);
+            appliedTrxPerBlock.erase(iter);
+        }
+
+        // Update our monitoring system
+        prometheusExposer->getPendingBlocksGauge().Set(appliedTrxPerBlock.size());
+        prometheusExposer->getOldestPendingBlockGauge().Set(appliedTrxPerBlock.empty() ? 0 : appliedTrxPerBlock.begin()->first);
     }
 
     kafka_plugin_impl::kafka_plugin_impl()
@@ -651,14 +675,6 @@ using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
                             my->applied_irreversible_block(bs);
                         }));
 
-                // If no accept trx topic name is specified - do not subscribe for the events.
-                if(accept_trx_topic) {
-                    my->accepted_transaction_connection.emplace(
-                            chain.accepted_transaction.connect([&](const chain::transaction_metadata_ptr &t) {
-                                my->accepted_transaction(t);
-                            }));
-                }
-
                 my->applied_transaction_connection.emplace(
                         chain.applied_transaction.connect([&](const chain::transaction_trace_ptr &t) {
                             my->applied_transaction(t);
@@ -681,7 +697,6 @@ using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
 
         my->accepted_block_connection.reset();
         my->irreversible_block_connection.reset();
-        my->accepted_transaction_connection.reset();
         my->applied_transaction_connection.reset();
         my.reset();
 
