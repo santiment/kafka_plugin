@@ -129,7 +129,7 @@ using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
 
         void _process_applied_block(std::map<transaction_id_type, trasaction_info_st>& trxsInThisBlock,
                                     const vector<chain::transaction_receipt>& trxReceipts,
-                                    uint64_t blockNumber);
+                                    uint64_t blockNumber, uint64_t blockTime);
 
         static void kafkaCallbackFunction(rd_kafka_t *rk, const rd_kafka_message_t *rkmessage, void *opaque);
         static void handle_kafka_exception();
@@ -443,7 +443,9 @@ using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
 
      void kafka_plugin_impl::_process_applied_block(std::map<transaction_id_type, trasaction_info_st>& trxsInThisBlock,
                                                     const vector<chain::transaction_receipt>& trxReceipts,
-                                                    uint64_t blockNumber) {
+                                                    uint64_t blockNumber,
+                                                    uint64_t blockTimeEpochMilliSeconds) {
+
        // Iterate over all the receipts received in this block. Get the complete actions out of the previously
        // stored map for this block.
        for(const chain::transaction_receipt& receipt : trxReceipts) {
@@ -481,8 +483,6 @@ using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
            std::stringstream sstream;
            sstream << last_sent_act_id;
 
-           uint64_t time = (iterTrx->second.block_time.time_since_epoch().count()/1000);
-
            // If the application is quitting it is unsafe to touch the chain_plugin. Return.
            if(app().is_quiting()) {
                return;
@@ -492,7 +492,7 @@ using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
 
            // Store the block time at an upper layer. This allows us to easily correct if it varies for actions inside.
            string transaction_metadata_json =
-                        "{\"block_number\":" + std::to_string(iterTrx->second.block_number) + ",\"block_time\":" + std::to_string(time) +
+                        "{\"block_number\":" + std::to_string(iterTrx->second.block_number) + ",\"block_time\":" + std::to_string(blockTimeEpochMilliSeconds) +
                         ",\"trace\":" + fc::json::to_string(tracesVar).c_str() + "}";
 
            producer->trx_kafka_sendmsg(KAFKA_TRX_APPLIED,
@@ -525,7 +525,10 @@ using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
 
         if(iter != appliedTrxPerBlock.end())
         {
-            _process_applied_block(iter->second, bs->block->transactions, bs->block_num);
+            _process_applied_block(iter->second,
+                                   bs->block->transactions,
+                                   bs->block_num,
+                                   bs->block->timestamp.to_time_point().time_since_epoch().count() / 1000);
             appliedTrxPerBlock.erase(iter);
         }
 
