@@ -54,6 +54,7 @@ using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
         prometheus::Gauge& abnormalityBlockGauge;
         prometheus::Gauge& pendingBlocksGauge;
         prometheus::Gauge& oldestPendingBlockGauge;
+        prometheus::Gauge& blockWithPreviousTimestampGauge;
     public:
         PrometheusExposer(const std::string& hostPort)
             :
@@ -68,9 +69,11 @@ using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
             abnormalityBlockGauge(gaugeFamily.Add(
                 {{"name", "abnormalityBlockCounter"}})),
             pendingBlocksGauge(gaugeFamily.Add(
-              {{"name", "pendingBlocksCounter"}})),
+                {{"name", "pendingBlocksCounter"}})),
             oldestPendingBlockGauge(gaugeFamily.Add(
-              {{"name", "oldestPendingBlock"}}))
+                {{"name", "oldestPendingBlock"}})),
+            blockWithPreviousTimestampGauge(gaugeFamily.Add(
+                {{"name", "blockWithPreviousTimestamp"}}))
         {
             exposer.RegisterCollectable(registry);
         }
@@ -86,6 +89,9 @@ using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
         }
         prometheus::Gauge& getOldestPendingBlockGauge() {
             return oldestPendingBlockGauge;
+        }
+        prometheus::Gauge& getBlockWithPreviousTimestampGauge() {
+            return blockWithPreviousTimestampGauge;
         }
     };
 
@@ -153,34 +159,15 @@ using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
         boost::thread consume_thread;
         boost::atomic<bool> done{false};
         boost::atomic<bool> startup{true};
-        fc::optional<chain::chain_id_type> chain_id;
-        fc::microseconds abi_serializer_max_time;
 
-        static const account_name newaccount;
-        static const account_name setabi;
-
-        static const std::string block_states_col;
-        static const std::string blocks_col;
-        static const std::string trans_col;
-        static const std::string trans_traces_col;
-        static const std::string actions_col;
-        static const std::string accounts_col;
         kafka_producer_ptr producer;
         const uint64_t KAFKA_BLOCK_REACHED_LOG_INTERVAL = 1000;
         static bool kafkaTriggeredQuit;
         std::shared_ptr<PrometheusExposer> prometheusExposer;
         std::map<uint64_t, std::map<transaction_id_type, trasaction_info_st>> appliedTrxPerBlock;
+        uint64_t blockTimestampReached = 0;
     };
 
-    const account_name kafka_plugin_impl::newaccount = "newaccount";
-    const account_name kafka_plugin_impl::setabi = "setabi";
-
-    const std::string kafka_plugin_impl::block_states_col = "block_states";
-    const std::string kafka_plugin_impl::blocks_col = "blocks";
-    const std::string kafka_plugin_impl::trans_col = "transactions";
-    const std::string kafka_plugin_impl::trans_traces_col = "transaction_traces";
-    const std::string kafka_plugin_impl::actions_col = "actions";
-    const std::string kafka_plugin_impl::accounts_col = "accounts";
     bool kafka_plugin_impl::kafkaTriggeredQuit = false;
 
     namespace {
@@ -446,6 +433,15 @@ using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
                                                     uint64_t blockNumber,
                                                     uint64_t blockTimeEpochMilliSeconds) {
 
+         // Correct the block timestamp if it is in the past
+         if(blockTimeEpochMilliSeconds < blockTimestampReached) {
+             blockTimeEpochMilliSeconds = blockTimestampReached;
+              prometheusExposer->getBlockWithPreviousTimestampGauge().Set(blockNumber);
+         }
+         else {
+             blockTimestampReached = blockTimeEpochMilliSeconds;
+         }
+
        // Iterate over all the receipts received in this block. Get the complete actions out of the previously
        // stored map for this block.
        for(const chain::transaction_receipt& receipt : trxReceipts) {
@@ -667,7 +663,6 @@ using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
                 my->chain_plug = app().find_plugin<chain_plugin>();
                 EOS_ASSERT(my->chain_plug, chain::missing_chain_plugin_exception, "");
                 auto &chain = my->chain_plug->chain();
-                my->chain_id.emplace(chain.get_chain_id());
 
                 my->accepted_block_connection.emplace( chain.accepted_block.connect( [&]( const chain::block_state_ptr& bs ) {
                             my->accepted_block(bs);
