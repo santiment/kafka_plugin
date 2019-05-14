@@ -438,7 +438,8 @@ using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
      void kafka_plugin_impl::_process_applied_block(std::map<transaction_id_type, trasaction_info_st>& trxsInThisBlock,
                                                     const vector<chain::transaction_receipt>& trxReceipts,
                                                     uint64_t blockNumber,
-                                                    uint64_t blockTimeEpochMilliSeconds) {
+                                                    uint64_t blockTimeEpochMilliSeconds)
+     {
 
          // Correct the block timestamp if it is in the past
          if(blockTimeEpochMilliSeconds < blockTimestampReached) {
@@ -448,6 +449,9 @@ using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
          else {
              blockTimestampReached = blockTimeEpochMilliSeconds;
          }
+
+         // As the received transaction receipts are not ordered by global sequence, we need to re-order before sending.
+         std::map<uint64_t, chain::transaction_trace_ptr> orderedActions;
 
        // Iterate over all the receipts received in this block. Get the complete actions out of the previously
        // stored map for this block.
@@ -480,14 +484,25 @@ using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
            auto& actionTraces = transactionTrace->action_traces;
 
            filterSetcodeData(actionTraces);
-
            uint64_t actionID = getLastActionID(actionTraces);
-           if(actionID <= actionIDReached) {
-               prometheusExposer->getBlockWithPreviousActionIDGauge().Set(blockNumber);
-           }
-           else {
-               actionIDReached = actionID;
-           }
+
+           orderedActions.insert(std::make_pair(actionID, iterTrx->second.trace));
+       }
+
+
+        for(std::map<uint64_t, chain::transaction_trace_ptr>::iterator iter = orderedActions.begin();
+            iter != orderedActions.end();
+            ++iter)
+        {
+            uint64_t actionID = iter->first;
+            chain::transaction_trace_ptr transactionTrace = iter->second;
+
+            if(actionID <= actionIDReached) {
+                prometheusExposer->getBlockWithPreviousActionIDGauge().Set(blockNumber);
+            }
+            else {
+                actionIDReached = actionID;
+            }
 
            std::stringstream sstream;
            sstream << actionID;
@@ -501,7 +516,7 @@ using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
 
            // Store the block time at an upper layer. This allows us to easily correct if it varies for actions inside.
            string transaction_metadata_json =
-                        "{\"block_number\":" + std::to_string(iterTrx->second.block_number) + ",\"block_time\":" + std::to_string(blockTimeEpochMilliSeconds) +
+                        "{\"block_number\":" + std::to_string(blockNumber) + ",\"block_time\":" + std::to_string(blockTimeEpochMilliSeconds) +
                         ",\"trace\":" + fc::json::to_string(tracesVar).c_str() + "}";
 
            producer->trx_kafka_sendmsg(KAFKA_TRX_APPLIED,
