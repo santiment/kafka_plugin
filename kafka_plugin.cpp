@@ -55,6 +55,7 @@ using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
         prometheus::Gauge& pendingBlocksGauge;
         prometheus::Gauge& oldestPendingBlockGauge;
         prometheus::Gauge& blockWithPreviousTimestampGauge;
+        prometheus::Gauge& blockWithPreviousActionIDGauge;
     public:
         PrometheusExposer(const std::string& hostPort)
             :
@@ -73,7 +74,9 @@ using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
             oldestPendingBlockGauge(gaugeFamily.Add(
                 {{"name", "oldestPendingBlock"}})),
             blockWithPreviousTimestampGauge(gaugeFamily.Add(
-                {{"name", "blockWithPreviousTimestamp"}}))
+                {{"name", "blockWithPreviousTimestamp"}})),
+            blockWithPreviousActionIDGauge(gaugeFamily.Add(
+              {{"name", "blockWithPreviousActionID"}}))
         {
             exposer.RegisterCollectable(registry);
         }
@@ -92,6 +95,9 @@ using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
         }
         prometheus::Gauge& getBlockWithPreviousTimestampGauge() {
             return blockWithPreviousTimestampGauge;
+        }
+        prometheus::Gauge& getBlockWithPreviousActionIDGauge() {
+            return blockWithPreviousActionIDGauge;
         }
     };
 
@@ -166,6 +172,7 @@ using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
         std::shared_ptr<PrometheusExposer> prometheusExposer;
         std::map<uint64_t, std::map<transaction_id_type, trasaction_info_st>> appliedTrxPerBlock;
         uint64_t blockTimestampReached = 0;
+        uint64_t actionIDReached = 0;
     };
 
     bool kafka_plugin_impl::kafkaTriggeredQuit = false;
@@ -474,10 +481,16 @@ using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
 
            filterSetcodeData(actionTraces);
 
-           auto last_sent_act_id = getLastActionID(actionTraces);
+           uint64_t actionID = getLastActionID(actionTraces);
+           if(actionID <= actionIDReached) {
+               prometheusExposer->getBlockWithPreviousActionIDGauge().Set(blockNumber);
+           }
+           else {
+               actionIDReached = actionID;
+           }
 
            std::stringstream sstream;
-           sstream << last_sent_act_id;
+           sstream << actionID;
 
            // If the application is quitting it is unsafe to touch the chain_plugin. Return.
            if(app().is_quiting()) {
