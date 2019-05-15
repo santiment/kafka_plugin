@@ -17,10 +17,10 @@
 #include <fc/utf8.hpp>
 #include <fc/variant.hpp>
 
-#include <boost/chrono.hpp>
+#include <chrono>
 #include <boost/signals2/connection.hpp>
-#include <boost/thread/thread.hpp>
-#include <boost/thread/mutex.hpp>
+#include <thread>
+#include <mutex>
 #include <boost/thread/condition_variable.hpp>
 
 #include <prometheus/exposer.h>
@@ -160,11 +160,11 @@ using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
         std::deque<chain::block_state_ptr> block_state_process_queue;
         std::deque<chain::block_state_ptr> irreversible_block_state_queue;
         std::deque<chain::block_state_ptr> irreversible_block_state_process_queue;
-        boost::mutex mtx;
-        boost::condition_variable condition;
-        boost::thread consume_thread;
-        boost::atomic<bool> done{false};
-        boost::atomic<bool> startup{true};
+        std::mutex mtx;
+        std::condition_variable condition;
+        std::thread consume_thread;
+        std::atomic<bool> done{false};
+        std::atomic<bool> startup{true};
 
         kafka_producer_ptr producer;
         const uint64_t KAFKA_BLOCK_REACHED_LOG_INTERVAL = 1000;
@@ -180,11 +180,11 @@ using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
     namespace {
 
         template<typename Queue, typename Entry>
-        void queue(boost::mutex &mtx, boost::condition_variable &condition, Queue &queue, const Entry &e,
+        void queue(std::mutex &mtx, std::condition_variable &condition, Queue &queue, const Entry &e,
                    size_t queue_size) {
             int sleep_time = 100;
             size_t last_queue_size = 0;
-            boost::mutex::scoped_lock lock(mtx);
+            std::unique_lock lock(mtx);
             if (queue.size() > queue_size) {
                 lock.unlock();
                 condition.notify_one();
@@ -195,7 +195,7 @@ using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
                     if (sleep_time < 0) sleep_time = 100;
                 }
                 last_queue_size = queue.size();
-                boost::this_thread::sleep_for(boost::chrono::milliseconds(sleep_time));
+                std::this_thread::sleep_for(std::chrono::milliseconds(sleep_time));
                 lock.lock();
             }
             queue.emplace_back(e);
@@ -207,10 +207,9 @@ using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
 
     void kafka_plugin_impl::applied_transaction(const chain::transaction_trace_ptr &t) {
         try {
-            auto &chain = chain_plug->chain();
             trasaction_info_st transactioninfo = trasaction_info_st{
-                    .block_number = chain.pending_block_state()->block_num,
-                    .block_time = chain.pending_block_time(),
+                    .block_number = t->block_num,
+                    .block_time = t->block_time,
                     .trace =chain::transaction_trace_ptr(t)
             };
             trasaction_info_st &info_t = transactioninfo;
@@ -254,7 +253,7 @@ using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
         try {
 
             while (true && !app().is_quiting()) {
-                boost::mutex::scoped_lock lock(mtx);
+                std::unique_lock lock(mtx);
                 while (transaction_metadata_queue.empty() &&
                        transaction_trace_queue.empty() &&
                        block_state_queue.empty() &&
@@ -393,13 +392,23 @@ using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
     }
 
     // This will return the sequence id of the last action. Due to inner actions we need to recurse inside.
-    uint64_t getLastActionID(const vector<chain::action_trace>& vecActions) {
+/*    uint64_t getLargestActionID(const vector<chain::action_trace>& vecActions) {
         int lastIndex = vecActions.size()-1;
         if( vecActions[lastIndex].inline_traces.empty()) {
             return vecActions[lastIndex].receipt.global_sequence;
         } else {
             return getLastActionID(vecActions[lastIndex].inline_traces);
         }
+    } */
+
+    uint64_t getLargestActionID(const vector<chain::action_trace>& vecActions) {
+        uint64_t largestActionID = 0;
+        for( const auto actionTrace : vecActions) {
+            if(largestActionID < actionTrace.receipt->global_sequence) {
+                largestActionID = actionTrace.receipt->global_sequence;
+            }
+        }
+        return largestActionID;
     }
 
     void filterSetcodeData(vector<chain::action_trace>& vecActions) {
@@ -411,9 +420,6 @@ using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
                 actTrace.act.data = fc::raw::pack(sc);
                 dlog("'setcode' action is cleared of code data. Block number is: ${block_number}",
                      ("block_number", actTrace.block_num));
-            }
-            if( !actTrace.inline_traces.empty()) {
-                filterSetcodeData(actTrace.inline_traces);
             }
         }
     }
@@ -484,7 +490,7 @@ using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
            auto& actionTraces = transactionTrace->action_traces;
 
            filterSetcodeData(actionTraces);
-           uint64_t actionID = getLastActionID(actionTraces);
+           uint64_t actionID = getLargestActionID(actionTraces);
 
            orderedActions.insert(std::make_pair(actionID, iterTrx->second.trace));
        }
@@ -591,7 +597,7 @@ using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
         prometheusExposer.reset(new PrometheusExposer(prometheustHostPort));
 
         ilog("Starting kafka plugin thread");
-        consume_thread = boost::thread([this] { consume_blocks(); });
+        consume_thread = std::thread([this] { consume_blocks(); });
         startup = false;
     }
 
@@ -702,8 +708,8 @@ using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
                         }));
 
                 my->applied_transaction_connection.emplace(
-                        chain.applied_transaction.connect([&](const chain::transaction_trace_ptr &t) {
-                            my->applied_transaction(t);
+                        chain.applied_transaction.connect([&](std::tuple<const chain::transaction_trace_ptr&, const signed_transaction&> tupleTrx) {
+                            my->applied_transaction(std::get<0>(tupleTrx));
                         }));
                 my->init(options);
             } else {
