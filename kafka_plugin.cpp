@@ -115,6 +115,7 @@ using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
             uint64_t block_number;
             fc::time_point block_time;
             chain::transaction_trace_ptr trace;
+            fc::variant tracesVar;
         };
 
         void consume_blocks();
@@ -210,7 +211,8 @@ using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
             trasaction_info_st transactioninfo = trasaction_info_st{
                     .block_number = t->block_num,
                     .block_time = t->block_time,
-                    .trace =chain::transaction_trace_ptr(t)
+                    .trace =chain::transaction_trace_ptr(t),
+                    .tracesVar = chain_plug->chain().to_variant_with_abi(*t, chain_plug->get_abi_serializer_max_time())
             };
             trasaction_info_st &info_t = transactioninfo;
 
@@ -252,7 +254,7 @@ using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
     void kafka_plugin_impl::consume_blocks() {
         try {
 
-            while (true && !app().is_quiting()) {
+            while (!kafkaTriggeredQuit) {
                 std::unique_lock lock(mtx);
                 while (transaction_metadata_queue.empty() &&
                        transaction_trace_queue.empty() &&
@@ -457,7 +459,7 @@ using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
          }
 
          // As the received transaction receipts are not ordered by global sequence, we need to re-order before sending.
-         std::map<uint64_t, chain::transaction_trace_ptr> orderedActions;
+         std::map<uint64_t, fc::variant> orderedActions;
 
        // Iterate over all the receipts received in this block. Get the complete actions out of the previously
        // stored map for this block.
@@ -492,16 +494,15 @@ using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
            filterSetcodeData(actionTraces);
            uint64_t actionID = getLargestActionID(actionTraces);
 
-           orderedActions.insert(std::make_pair(actionID, iterTrx->second.trace));
+           orderedActions.insert(std::make_pair(actionID, iterTrx->second.tracesVar));
        }
 
 
-        for(std::map<uint64_t, chain::transaction_trace_ptr>::iterator iter = orderedActions.begin();
+        for(auto iter = orderedActions.begin();
             iter != orderedActions.end();
             ++iter)
         {
             uint64_t actionID = iter->first;
-            chain::transaction_trace_ptr transactionTrace = iter->second;
 
             if(actionID <= actionIDReached) {
                 prometheusExposer->getBlockWithPreviousActionIDGauge().Set(blockNumber);
@@ -517,13 +518,11 @@ using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
            if(app().is_quiting()) {
                return;
            }
-           auto &chain = chain_plug->chain();
-           fc::variant tracesVar = chain.to_variant_with_abi(*transactionTrace, chain_plug->get_abi_serializer_max_time());
 
            // Store the block time at an upper layer. This allows us to easily correct if it varies for actions inside.
            string transaction_metadata_json =
                         "{\"block_number\":" + std::to_string(blockNumber) + ",\"block_time\":" + std::to_string(blockTimeEpochMilliSeconds) +
-                        ",\"trace\":" + fc::json::to_string(tracesVar).c_str() + "}";
+                        ",\"trace\":" + fc::json::to_string(iter->second).c_str() + "}";
 
            producer->trx_kafka_sendmsg(KAFKA_TRX_APPLIED,
                                        (char*)transaction_metadata_json.c_str(),
@@ -626,10 +625,12 @@ using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
 ////////////
 
     kafka_plugin::kafka_plugin()
-            : my(new kafka_plugin_impl) {
+            : my(new kafka_plugin_impl()) {
     }
 
     kafka_plugin::~kafka_plugin() {
+        ilog("kafka_plugin::~kafka_plugin()");
+        plugin_shutdown();
     }
 
     void kafka_plugin::set_program_options(options_description &cli, options_description &cfg) {
@@ -723,15 +724,18 @@ using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
     }
 
     void kafka_plugin::plugin_startup() {
+        ilog("kafka_plugin::plugin_startup()");
     }
 
     void kafka_plugin::plugin_shutdown() {
-
-        my->accepted_block_connection.reset();
-        my->irreversible_block_connection.reset();
-        my->applied_transaction_connection.reset();
-        my.reset();
-
+        if(my) {
+            ilog("kafka_plugin::plugin_shutdown()");
+            my->kafkaTriggeredQuit = true;
+            my->accepted_block_connection.reset();
+            my->irreversible_block_connection.reset();
+            my->applied_transaction_connection.reset();
+            my.reset();
+        }
     }
 
 } // namespace eosio
