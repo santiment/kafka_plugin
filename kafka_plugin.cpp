@@ -393,16 +393,7 @@ using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
         }
     }
 
-    // This will return the sequence id of the last action. Due to inner actions we need to recurse inside.
-/*    uint64_t getLargestActionID(const vector<chain::action_trace>& vecActions) {
-        int lastIndex = vecActions.size()-1;
-        if( vecActions[lastIndex].inline_traces.empty()) {
-            return vecActions[lastIndex].receipt.global_sequence;
-        } else {
-            return getLastActionID(vecActions[lastIndex].inline_traces);
-        }
-    } */
-
+    // This will return the largest sequence id of this batch of actions.
     uint64_t getLargestActionID(const vector<chain::action_trace>& vecActions) {
         uint64_t largestActionID = 0;
         for( const auto actionTrace : vecActions) {
