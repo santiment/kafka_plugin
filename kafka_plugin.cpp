@@ -206,13 +206,42 @@ using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
 
     }
 
+    struct {
+          bool operator()(chain::action_trace a, chain::action_trace b) const
+          {
+              return a.receipt->global_sequence < b.receipt->global_sequence;
+          }
+      } actionComparator;
+
+    // Sort the actions by global sequence ID
+    void sortActionsByActionID(vector<chain::action_trace>& vecActions) {
+        std::sort(vecActions.begin(), vecActions.end(), actionComparator);
+    }
+
+    void filterSetcodeData(vector<chain::action_trace>& vecActions) {
+        for(auto& actTrace : vecActions) {
+            if("setcode" == actTrace.act.name.to_string() &&
+                "eosio" == actTrace.act.account.to_string()) {
+                chain::setcode sc = actTrace.act.data_as<chain::setcode>();
+                sc.code.clear();
+                actTrace.act.data = fc::raw::pack(sc);
+                dlog("'setcode' action is cleared of code data. Block number is: ${block_number}",
+                     ("block_number", actTrace.block_num));
+            }
+        }
+    }
+
     void kafka_plugin_impl::applied_transaction(const chain::transaction_trace_ptr &t) {
+        chain::transaction_trace_ptr traceWithOrderedActions(t);
+        auto& actionTraces = traceWithOrderedActions->action_traces;
+        filterSetcodeData(actionTraces);
+        sortActionsByActionID(actionTraces);
         try {
             trasaction_info_st transactioninfo = trasaction_info_st{
                     .block_number = t->block_num,
                     .block_time = t->block_time,
-                    .trace =chain::transaction_trace_ptr(t),
-                    .tracesVar = chain_plug->chain().to_variant_with_abi(*t, chain_plug->get_abi_serializer_max_time())
+                    .trace = traceWithOrderedActions,
+                    .tracesVar = chain_plug->chain().to_variant_with_abi(*traceWithOrderedActions, chain_plug->get_abi_serializer_max_time())
             };
             trasaction_info_st &info_t = transactioninfo;
 
@@ -393,31 +422,7 @@ using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
         }
     }
 
-    // This will return the largest sequence id of this batch of actions.
-    uint64_t getLargestActionID(const vector<chain::action_trace>& vecActions) {
-        uint64_t largestActionID = 0;
-        for( const auto actionTrace : vecActions) {
-            if(largestActionID < actionTrace.receipt->global_sequence) {
-                largestActionID = actionTrace.receipt->global_sequence;
-            }
-        }
-        return largestActionID;
-    }
-
-    void filterSetcodeData(vector<chain::action_trace>& vecActions) {
-        for(auto& actTrace : vecActions) {
-            if("setcode" == actTrace.act.name.to_string() &&
-                "eosio" == actTrace.act.account.to_string()) {
-                chain::setcode sc = actTrace.act.data_as<chain::setcode>();
-                sc.code.clear();
-                actTrace.act.data = fc::raw::pack(sc);
-                dlog("'setcode' action is cleared of code data. Block number is: ${block_number}",
-                     ("block_number", actTrace.block_num));
-            }
-        }
-    }
-
-     void kafka_plugin_impl::_process_applied_transaction(const trasaction_info_st &t) {
+    void kafka_plugin_impl::_process_applied_transaction(const trasaction_info_st &t) {
        if(t.trace->action_traces.empty()) {
            dlog("Apply transaction with id: ${id} is skipped. No actions inside. Block number is: ${block_number}",
                 ("id", t.trace->id.str())
@@ -482,8 +487,7 @@ using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
            auto& transactionTrace = iterTrx->second.trace;
            auto& actionTraces = transactionTrace->action_traces;
 
-           filterSetcodeData(actionTraces);
-           uint64_t actionID = getLargestActionID(actionTraces);
+           uint64_t actionID = actionTraces.back().receipt->global_sequence;
 
            orderedActions.insert(std::make_pair(actionID, iterTrx->second.tracesVar));
        }
