@@ -206,8 +206,24 @@ using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
 
     }
 
+
+    void filterSetcodeData(vector<chain::action_trace>& vecActions) {
+        for(auto& actTrace : vecActions) {
+            if("setcode" == actTrace.act.name.to_string() &&
+                "eosio" == actTrace.act.account.to_string()) {
+                chain::setcode sc = actTrace.act.data_as<chain::setcode>();
+                sc.code.clear();
+                actTrace.act.data = fc::raw::pack(sc);
+                dlog("'setcode' action is cleared of code data. Block number is: ${block_number}",
+                     ("block_number", actTrace.block_num));
+            }
+        }
+    }
+
     void kafka_plugin_impl::applied_transaction(const chain::transaction_trace_ptr &t) {
         try {
+            filterSetcodeData(t->action_traces);
+
             trasaction_info_st transactioninfo = trasaction_info_st{
                     .block_number = t->block_num,
                     .block_time = t->block_time,
@@ -404,19 +420,6 @@ using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
         return largestActionID;
     }
 
-    void filterSetcodeData(vector<chain::action_trace>& vecActions) {
-        for(auto& actTrace : vecActions) {
-            if("setcode" == actTrace.act.name.to_string() &&
-                "eosio" == actTrace.act.account.to_string()) {
-                chain::setcode sc = actTrace.act.data_as<chain::setcode>();
-                sc.code.clear();
-                actTrace.act.data = fc::raw::pack(sc);
-                dlog("'setcode' action is cleared of code data. Block number is: ${block_number}",
-                     ("block_number", actTrace.block_num));
-            }
-        }
-    }
-
      void kafka_plugin_impl::_process_applied_transaction(const trasaction_info_st &t) {
        if(t.trace->action_traces.empty()) {
            dlog("Apply transaction with id: ${id} is skipped. No actions inside. Block number is: ${block_number}",
@@ -482,7 +485,6 @@ using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
            auto& transactionTrace = iterTrx->second.trace;
            auto& actionTraces = transactionTrace->action_traces;
 
-           filterSetcodeData(actionTraces);
            uint64_t actionID = getLargestActionID(actionTraces);
 
            orderedActions.insert(std::make_pair(actionID, iterTrx->second.tracesVar));
