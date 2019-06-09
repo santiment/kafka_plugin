@@ -245,7 +245,12 @@ using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
 
     void kafka_plugin_impl::process_applied_transaction(const trasaction_info_st &t) {
         try {
-            if (start_block_reached) {
+            if (!start_block_reached) {
+               if (t.block_number >= start_block_num) {
+                    start_block_reached = true;
+                }
+            }
+            else {
                 _process_applied_transaction(t);
             }
         } catch (fc::exception &e) {
