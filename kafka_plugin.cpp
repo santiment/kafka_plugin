@@ -283,7 +283,10 @@ using kafka_producer_ptr = std::shared_ptr<class kafka_producer>;
                 ("block_number", t.block_number));
            return;
        }
-
+       if (t.trace->receipt->status != chain::transaction_receipt_header::executed) {
+           // Failed transactions are also reported. Ignore those.
+           return;
+       }
        if( t.block_number < prometheusExposer->getBlockGauge().Value()) { // Late applied action for irreversible block.
            prometheusExposer->getAbnormalityBlockGauge().Set(prometheusExposer->getBlockGauge().Value());
            return;
