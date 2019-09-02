@@ -62,6 +62,9 @@ namespace eosio {
             const char* bufCompression = "lz4";
             const char* bufIdempotent = "true";
 
+            char bufMsgMaxBytes[16];
+            snprintf(bufMsgMaxBytes, sizeof(bufMsgMaxBytes), "%i", 10485760);
+
             if ((rd_kafka_conf_set(applied_conf, "bootstrap.servers", brokers, errstr,
                                   sizeof(errstr)) != RD_KAFKA_CONF_OK) ||
                 (rd_kafka_conf_set(applied_conf, "compression.codec", bufCompression, errstr,
@@ -69,6 +72,8 @@ namespace eosio {
                 (rd_kafka_conf_set(applied_conf, "enable.idempotence", bufIdempotent, errstr,
                                                   sizeof(errstr)) != RD_KAFKA_CONF_OK) ||
                 (rd_kafka_conf_set(applied_conf, "message.timeout.ms", bufMsgTimeoutms, errstr,
+                                                  sizeof(errstr)) != RD_KAFKA_CONF_OK) ||
+                (rd_kafka_conf_set(applied_conf, "message.max.bytes", bufMsgMaxBytes, errstr,
                                                   sizeof(errstr)) != RD_KAFKA_CONF_OK))
             {
                 fprintf(stderr, "%s\n", errstr);
